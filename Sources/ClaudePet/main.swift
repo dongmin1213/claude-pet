@@ -4,7 +4,7 @@ import SwiftUI
 // MARK: - Layout constants
 
 let MAIN_W: CGFloat = 92    // width of each row's main-crab block
-let ROW_H:  CGFloat = 60    // height of one session row
+let ROW_H:  CGFloat = 88    // height of one session row (incl. icon + label space)
 let TOP_PAD: CGFloat = 20   // headroom above the first row for status icons
 let MINI_W: CGFloat = 34    // width of each subagent mini-crab slot
 let MAIN_PX: CGFloat = 4
@@ -19,8 +19,9 @@ struct Session: Equatable {
     let state: PetState
     let agents: Int
     let born: Double
+    let label: String
     static func == (a: Session, b: Session) -> Bool {
-        a.id == b.id && a.state == b.state && a.agents == b.agents
+        a.id == b.id && a.state == b.state && a.agents == b.agents && a.label == b.label
     }
 }
 
@@ -28,7 +29,7 @@ struct Session: Equatable {
 /// ~/.claude-pet/sessions/<session_id>/{state,agents,born}.
 /// Falls back to a single "default" session from legacy ~/.claude-pet/{state,agents}.
 final class StateStore: ObservableObject {
-    @Published var sessions: [Session] = [Session(id: "default", state: .idle, agents: 0, born: 0)]
+    @Published var sessions: [Session] = [Session(id: "default", state: .idle, agents: 0, born: 0, label: "")]
     var onResize: ((CGSize) -> Void)?
 
     private let base: String
@@ -62,7 +63,7 @@ final class StateStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    private func resolved(id: String, raw: String, agents: Int, born: Double) -> Session {
+    private func resolved(id: String, raw: String, agents: Int, born: Double, label: String) -> Session {
         var st = PetState(rawValue: raw) ?? .idle
         let now = Date()
         if st == .done {
@@ -71,7 +72,7 @@ final class StateStore: ObservableObject {
         } else {
             doneSince[id] = nil
         }
-        return Session(id: id, state: st, agents: max(0, agents), born: born)
+        return Session(id: id, state: st, agents: max(0, agents), born: born, label: label)
     }
 
     private func poll() {
@@ -85,13 +86,14 @@ final class StateStore: ObservableObject {
                 let st = token(dir + "/state")
                 let ag = Int(token(dir + "/agents")) ?? 0
                 let born = Double(token(dir + "/born")) ?? 0
-                list.append(resolved(id: id, raw: st.isEmpty ? "idle" : st, agents: ag, born: born))
+                let lb = token(dir + "/label")
+                list.append(resolved(id: id, raw: st.isEmpty ? "idle" : st, agents: ag, born: born, label: lb))
             }
         }
         if list.isEmpty {
             let st = token(legacyState)
             let ag = Int(token(legacyAgents)) ?? 0
-            list = [resolved(id: "default", raw: st.isEmpty ? "idle" : st, agents: ag, born: 0)]
+            list = [resolved(id: "default", raw: st.isEmpty ? "idle" : st, agents: ag, born: 0, label: "")]
         }
         list.sort { $0.born != $1.born ? $0.born < $1.born : $0.id < $1.id }
 
@@ -209,7 +211,7 @@ enum Renderer {
 
     /// Draws one session's main crab on its row. State is shown by an emoji
     /// status icon plus a distinct motion (no background).
-    static func drawMain(_ ctx: GraphicsContext, state: PetState, centerX: CGFloat, groundY: CGFloat, time: Double) {
+    static func drawMain(_ ctx: GraphicsContext, state: PetState, label: String, centerX: CGFloat, groundY: CGFloat, time: Double) {
         let px = MAIN_PX
         let sw = px * 16, sh = px * 12
         let blink = time.truncatingRemainder(dividingBy: 3.4) > 3.24
@@ -248,17 +250,30 @@ enum Renderer {
             }
         }
 
-        // emoji status icon above the head
+        // emoji status icon above the head — fixed height (independent of bob)
+        // so a jumping crab never collides with the row above's label
         if !icon.isEmpty {
+            let iconY = (groundY - sh) - 9 - iconBounce
             ctx.draw(Text(icon).font(.system(size: 12)),
-                     at: CGPoint(x: centerX, y: topY - 8 - iconBounce))
+                     at: CGPoint(x: centerX, y: iconY))
+        }
+
+        // session label (folder name) under the crab
+        if !label.isEmpty {
+            let shown = label.count > 14 ? String(label.prefix(13)) + "…" : label
+            let pillW = CGFloat(shown.count) * 5.4 + 10
+            let cyLabel = groundY + 9
+            let pill = CGRect(x: centerX - pillW/2, y: cyLabel - 6.5, width: pillW, height: 13)
+            ctx.fill(Path(roundedRect: pill, cornerRadius: 6), with: .color(.black.opacity(0.45)))
+            ctx.draw(Text(shown).font(.system(size: 9, weight: .medium)).foregroundColor(.white),
+                     at: CGPoint(x: centerX, y: cyLabel))
         }
     }
 
     static func draw(ctx: GraphicsContext, size: CGSize, sessions: [Session], time: Double) {
         for (row, s) in sessions.enumerated() {
-            let groundY = TOP_PAD + CGFloat(row) * ROW_H + (ROW_H - 8)
-            drawMain(ctx, state: s.state, centerX: MAIN_W / 2, groundY: groundY, time: time)
+            let groundY = TOP_PAD + CGFloat(row) * ROW_H + (ROW_H - 16)
+            drawMain(ctx, state: s.state, label: s.label, centerX: MAIN_W / 2, groundY: groundY, time: time)
             if s.agents > 0 {
                 for j in 0..<s.agents {
                     let pal = minis[j % minis.count]
@@ -312,6 +327,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = StateStore()
     var window: PetWindow!
     var hosting: NSHostingView<PetRootView>!
+    var mouseTimer: Timer?
+
+    /// True when the cursor is over an actual crab (so the window should grab
+    /// clicks); false over the transparent gaps (so clicks pass through).
+    func isOverCrab(at screen: NSPoint) -> Bool {
+        guard let w = window else { return true }
+        let f = w.frame
+        guard screen.x >= f.minX, screen.x <= f.maxX,
+              screen.y >= f.minY, screen.y <= f.maxY else { return false }
+        let lx = screen.x - f.minX
+        let ly = screen.y - f.minY
+        let canvasY = f.height - ly                 // renderer is top-down
+        let swMain = MAIN_PX * 16, shMain = MAIN_PX * 12
+        let swMini = MINI_PX * 16
+        for (row, s) in store.sessions.enumerated() {
+            let groundY = TOP_PAD + CGFloat(row) * ROW_H + (ROW_H - 16)
+            let top = groundY - shMain - 16          // include icon + bob headroom
+            let bot = groundY + 3
+            if canvasY < top || canvasY > bot { continue }
+            if abs(lx - MAIN_W/2) <= swMain/2 + 4 { return true }
+            for j in 0..<s.agents {
+                let slot = MAIN_W + CGFloat(j) * MINI_W + MINI_W/2
+                if abs(lx - slot) <= swMini/2 + 4 { return true }
+            }
+        }
+        return false
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let initial = store.contentSize(for: store.sessions)
@@ -331,11 +373,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         window.orderFrontRegardless()
 
+        // click-through everywhere except directly on a crab
+        window.ignoresMouseEvents = true
+        mouseTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            guard let self = self, let w = self.window else { return }
+            w.ignoresMouseEvents = !self.isOverCrab(at: NSEvent.mouseLocation)
+        }
+
         // resize on session/agent change; keep the window fully on screen
         store.onResize = { [weak self] size in
             guard let self = self, let w = self.window else { return }
             var x = w.frame.minX
-            var y = w.frame.minY
+            var y = w.frame.maxY - size.height   // keep TOP edge fixed -> grow downward
             if let scr = NSScreen.main {
                 let vf = scr.visibleFrame
                 if x + size.width > vf.maxX { x = vf.maxX - size.width }

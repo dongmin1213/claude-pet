@@ -10,6 +10,11 @@ sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
 SDIR="$BASE/$sid"
 AG="$SDIR/agents"
 mkdir -p "$SDIR"
+# guarantee a stable creation time for ordering, even if SessionStart never fired
+[ -f "$SDIR/born" ] || date +%s > "$SDIR/born"
+# label the session by its working-directory name
+cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+[ -n "$cwd" ] && basename "$cwd" > "$SDIR/label"
 
 for act in "$@"; do
   case "$act" in
