@@ -1,0 +1,365 @@
+import AppKit
+import SwiftUI
+
+// MARK: - Layout constants
+
+let MAIN_W: CGFloat = 92    // width of each row's main-crab block
+let ROW_H:  CGFloat = 60    // height of one session row
+let TOP_PAD: CGFloat = 20   // headroom above the first row for status icons
+let MINI_W: CGFloat = 34    // width of each subagent mini-crab slot
+let MAIN_PX: CGFloat = 4
+let MINI_PX: CGFloat = 2
+
+// MARK: - Model
+
+enum PetState: String { case idle, working, done, waiting }
+
+struct Session: Equatable {
+    let id: String
+    let state: PetState
+    let agents: Int
+    let born: Double
+    static func == (a: Session, b: Session) -> Bool {
+        a.id == b.id && a.state == b.state && a.agents == b.agents
+    }
+}
+
+/// Reads per-session tokens written by Claude Code hooks under
+/// ~/.claude-pet/sessions/<session_id>/{state,agents,born}.
+/// Falls back to a single "default" session from legacy ~/.claude-pet/{state,agents}.
+final class StateStore: ObservableObject {
+    @Published var sessions: [Session] = [Session(id: "default", state: .idle, agents: 0, born: 0)]
+    var onResize: ((CGSize) -> Void)?
+
+    private let base: String
+    private let legacyState: String
+    private let legacyAgents: String
+    private var doneSince: [String: Date] = [:]
+    private var timer: Timer?
+
+    init() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        base = home + "/.claude-pet/sessions"
+        legacyState = home + "/.claude-pet/state"
+        legacyAgents = home + "/.claude-pet/agents"
+        poll()
+    }
+
+    func start() {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+    }
+
+    func contentSize(for list: [Session]) -> CGSize {
+        let maxA = list.map { $0.agents }.max() ?? 0
+        let rows = max(1, list.count)
+        return CGSize(width: MAIN_W + CGFloat(maxA) * MINI_W, height: CGFloat(rows) * ROW_H + TOP_PAD)
+    }
+
+    private func token(_ path: String) -> String {
+        (try? String(contentsOfFile: path, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private func resolved(id: String, raw: String, agents: Int, born: Double) -> Session {
+        var st = PetState(rawValue: raw) ?? .idle
+        let now = Date()
+        if st == .done {
+            if doneSince[id] == nil { doneSince[id] = now }
+            if now.timeIntervalSince(doneSince[id]!) > 4 { st = .idle }
+        } else {
+            doneSince[id] = nil
+        }
+        return Session(id: id, state: st, agents: max(0, agents), born: born)
+    }
+
+    private func poll() {
+        let fm = FileManager.default
+        var list: [Session] = []
+        if let entries = try? fm.contentsOfDirectory(atPath: base) {
+            for id in entries {
+                let dir = base + "/" + id
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else { continue }
+                let st = token(dir + "/state")
+                let ag = Int(token(dir + "/agents")) ?? 0
+                let born = Double(token(dir + "/born")) ?? 0
+                list.append(resolved(id: id, raw: st.isEmpty ? "idle" : st, agents: ag, born: born))
+            }
+        }
+        if list.isEmpty {
+            let st = token(legacyState)
+            let ag = Int(token(legacyAgents)) ?? 0
+            list = [resolved(id: "default", raw: st.isEmpty ? "idle" : st, agents: ag, born: 0)]
+        }
+        list.sort { $0.born != $1.born ? $0.born < $1.born : $0.id < $1.id }
+
+        if list != sessions {
+            let oldSize = contentSize(for: sessions)
+            let newSize = contentSize(for: list)
+            DispatchQueue.main.async {
+                self.sessions = list
+                if oldSize != newSize { self.onResize?(newSize) }
+            }
+        }
+    }
+}
+
+// MARK: - Palette
+
+struct Palette { let body, dark, light, eye, cream: Color }
+
+// MARK: - Renderer
+
+enum Renderer {
+    static let eye   = Color(red: 0.165, green: 0.102, blue: 0.071)
+    static let cream = Color(red: 0.969, green: 0.937, blue: 0.886)
+
+    static let main = Palette(
+        body:  Color(red: 0.851, green: 0.467, blue: 0.341),
+        dark:  Color(red: 0.722, green: 0.353, blue: 0.235),
+        light: Color(red: 0.910, green: 0.608, blue: 0.494),
+        eye: eye, cream: cream)
+
+    static let minis: [Palette] = [
+        Palette(body: .init(red: 0.31, green: 0.70, blue: 0.65), dark: .init(red: 0.18, green: 0.51, blue: 0.47), light: .init(red: 0.50, green: 0.83, blue: 0.78), eye: eye, cream: cream),
+        Palette(body: .init(red: 0.61, green: 0.48, blue: 0.85), dark: .init(red: 0.43, green: 0.32, blue: 0.66), light: .init(red: 0.74, green: 0.64, blue: 0.91), eye: eye, cream: cream),
+        Palette(body: .init(red: 0.44, green: 0.75, blue: 0.35), dark: .init(red: 0.30, green: 0.56, blue: 0.22), light: .init(red: 0.58, green: 0.85, blue: 0.51), eye: eye, cream: cream),
+        Palette(body: .init(red: 0.88, green: 0.48, blue: 0.66), dark: .init(red: 0.69, green: 0.32, blue: 0.49), light: .init(red: 0.94, green: 0.64, blue: 0.78), eye: eye, cream: cream),
+        Palette(body: .init(red: 0.35, green: 0.61, blue: 0.88), dark: .init(red: 0.22, green: 0.44, blue: 0.69), light: .init(red: 0.51, green: 0.74, blue: 0.94), eye: eye, cream: cream),
+        Palette(body: .init(red: 0.88, green: 0.70, blue: 0.31), dark: .init(red: 0.69, green: 0.52, blue: 0.18), light: .init(red: 0.94, green: 0.81, blue: 0.50), eye: eye, cream: cream),
+    ]
+
+    static let sprite: [String] = [
+        "................",
+        "...D........D...",
+        "..LOL......LOL..",
+        "...DOOOOOOOOD...",
+        "..OOOOOOOOOOOO..",
+        "..OOEEOOOOEEOO..",
+        "..OOEEOOOOEEOO..",
+        "..OOOOOOOOOOOO..",
+        "..LOOOOOOOOOOL..",
+        "...OOOOOOOOOO...",
+        "...D.D.DD.D.D...",
+        "................",
+    ]
+
+    static func color(_ ch: Character, _ pal: Palette) -> Color {
+        switch ch {
+        case "O": return pal.body
+        case "D": return pal.dark
+        case "L": return pal.light
+        case "E": return pal.eye
+        case "W": return pal.cream
+        default:  return pal.body
+        }
+    }
+
+    static func rectPath(_ r: CGRect) -> Path { var p = Path(); p.addRect(r); return p }
+
+    static func spark(_ ctx: GraphicsContext, _ c: CGPoint, _ s: CGFloat, _ color: Color) {
+        var p = Path()
+        p.move(to: CGPoint(x: c.x, y: c.y - s))
+        p.addLine(to: CGPoint(x: c.x + s*0.3, y: c.y - s*0.3))
+        p.addLine(to: CGPoint(x: c.x + s, y: c.y))
+        p.addLine(to: CGPoint(x: c.x + s*0.3, y: c.y + s*0.3))
+        p.addLine(to: CGPoint(x: c.x, y: c.y + s))
+        p.addLine(to: CGPoint(x: c.x - s*0.3, y: c.y + s*0.3))
+        p.addLine(to: CGPoint(x: c.x - s, y: c.y))
+        p.addLine(to: CGPoint(x: c.x - s*0.3, y: c.y - s*0.3))
+        p.closeSubpath()
+        ctx.fill(p, with: .color(color))
+    }
+
+    @discardableResult
+    static func drawSprite(_ ctx: GraphicsContext, centerX: CGFloat, groundY: CGFloat,
+                           px: CGFloat, pal: Palette, bob: CGFloat,
+                           eyeShift: CGFloat, blink: Bool) -> CGFloat {
+        let cols = 16, rows = 12
+        let sw = px * CGFloat(cols), sh = px * CGFloat(rows)
+        let originX = (centerX - sw/2).rounded()
+        let topY = (groundY - sh - bob).rounded()
+
+        let shW = sw * (0.7 - bob/300)
+        ctx.fill(Path(ellipseIn: CGRect(x: centerX - shW/2, y: groundY - px*0.6, width: shW, height: px*1.2)),
+                 with: .color(.black.opacity(0.16)))
+
+        for r in 0..<rows {
+            let chars = Array(sprite[r])
+            for c in 0..<cols {
+                let ch = chars[c]
+                if ch == "." { continue }
+                var x = originX + CGFloat(c) * px
+                var y = topY + CGFloat(r) * px
+                let w = px
+                var h = px
+                if ch == "E" {
+                    x += eyeShift
+                    if blink { y += px * 0.6; h = px * 0.4 }
+                }
+                ctx.fill(rectPath(CGRect(x: x, y: y, width: w, height: h)), with: .color(color(ch, pal)))
+            }
+        }
+        return topY
+    }
+
+    static let cDone = Color(red: 0.30, green: 0.69, blue: 0.31) // green (done sparkle)
+
+    /// Draws one session's main crab on its row. State is shown by an emoji
+    /// status icon plus a distinct motion (no background).
+    static func drawMain(_ ctx: GraphicsContext, state: PetState, centerX: CGFloat, groundY: CGFloat, time: Double) {
+        let px = MAIN_PX
+        let sw = px * 16, sh = px * 12
+        let blink = time.truncatingRemainder(dividingBy: 3.4) > 3.24
+
+        var bob: CGFloat = 0, eyeShift: CGFloat = 0
+        var icon = "", iconBounce: CGFloat = 0
+
+        switch state {
+        case .working:
+            bob = CGFloat(sin(time * 7.0)) * 2.5 + 3; icon = "🔨"
+        case .idle:
+            let hop = time.truncatingRemainder(dividingBy: 5.0)
+            if hop < 0.4 { bob = CGFloat(sin(hop / 0.4 * .pi)) * 7 }
+            else { bob = CGFloat(sin(time * 1.6)) * 1.0 }
+            icon = "💤"
+        case .done:
+            bob = abs(CGFloat(sin(time * 6.0))) * 7 + 2; icon = "✅"
+        case .waiting:
+            eyeShift = CGFloat(sin(time * 2.0)) * 1.2
+            bob = CGFloat(sin(time * 2.0)) * 1.0
+            icon = "💬"; iconBounce = CGFloat(abs(sin(time * 4.0))) * 3
+        }
+
+        let topY = (groundY - sh - bob).rounded()
+
+        drawSprite(ctx, centerX: centerX, groundY: groundY, px: px, pal: main, bob: bob, eyeShift: eyeShift, blink: blink)
+
+        // celebratory sparkle burst when done
+        if state == .done {
+            for i in 0..<3 {
+                let a = time * 2.5 + Double(i) * (2 * Double.pi / 3)
+                let sx = centerX + CGFloat(cos(a)) * sw * 0.62
+                let sy = (topY + sh/2) + CGFloat(sin(a)) * sh * 0.42
+                let tw = 0.4 + 0.6 * abs(CGFloat(sin(time * 5 + Double(i))))
+                spark(ctx, CGPoint(x: sx, y: sy), 4, cDone.opacity(Double(tw)))
+            }
+        }
+
+        // emoji status icon above the head
+        if !icon.isEmpty {
+            ctx.draw(Text(icon).font(.system(size: 12)),
+                     at: CGPoint(x: centerX, y: topY - 8 - iconBounce))
+        }
+    }
+
+    static func draw(ctx: GraphicsContext, size: CGSize, sessions: [Session], time: Double) {
+        for (row, s) in sessions.enumerated() {
+            let groundY = TOP_PAD + CGFloat(row) * ROW_H + (ROW_H - 8)
+            drawMain(ctx, state: s.state, centerX: MAIN_W / 2, groundY: groundY, time: time)
+            if s.agents > 0 {
+                for j in 0..<s.agents {
+                    let pal = minis[j % minis.count]
+                    let slotCenter = MAIN_W + CGFloat(j) * MINI_W + MINI_W / 2
+                    let phase = Double(j) * 0.7 + Double(row)
+                    let mbob = abs(CGFloat(sin(time * 5 + phase))) * 5 + 1
+                    let mblink = (time + Double(j) + Double(row)).truncatingRemainder(dividingBy: 3.0) > 2.85
+                    drawSprite(ctx, centerX: slotCenter, groundY: groundY, px: MINI_PX, pal: pal,
+                               bob: mbob, eyeShift: 0, blink: mblink)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - SwiftUI view
+
+struct PetRootView: View {
+    @ObservedObject var store: StateStore
+    var size: CGSize { store.contentSize(for: store.sessions) }
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0/30.0)) { tl in
+            Canvas { ctx, sz in
+                Renderer.draw(ctx: ctx, size: sz, sessions: store.sessions,
+                              time: tl.date.timeIntervalSinceReferenceDate)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+    }
+}
+
+// MARK: - Window
+
+final class PetWindow: NSWindow {
+    init(view: NSView, size: CGSize) {
+        super.init(contentRect: NSRect(origin: .zero, size: size),
+                   styleMask: [.borderless], backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        level = .floating
+        isMovableByWindowBackground = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        contentView = view
+    }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let store = StateStore()
+    var window: PetWindow!
+    var hosting: NSHostingView<PetRootView>!
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let initial = store.contentSize(for: store.sessions)
+        hosting = NSHostingView(rootView: PetRootView(store: store))
+        hosting.frame = NSRect(origin: .zero, size: initial)
+
+        let menu = NSMenu()
+        let quit = NSMenuItem(title: "Claude Pet 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
+        hosting.menu = menu
+
+        window = PetWindow(view: hosting, size: initial)
+        if let screen = NSScreen.main {
+            let f = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(x: f.maxX - initial.width - 24, y: f.minY + 60))
+        }
+        window.orderFrontRegardless()
+
+        // resize on session/agent change; keep the window fully on screen
+        store.onResize = { [weak self] size in
+            guard let self = self, let w = self.window else { return }
+            var x = w.frame.minX
+            var y = w.frame.minY
+            if let scr = NSScreen.main {
+                let vf = scr.visibleFrame
+                if x + size.width > vf.maxX { x = vf.maxX - size.width }
+                if x < vf.minX { x = vf.minX }
+                if y + size.height > vf.maxY { y = vf.maxY - size.height }
+                if y < vf.minY { y = vf.minY }
+            }
+            w.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+            self.hosting.frame = NSRect(origin: .zero, size: size)
+        }
+        store.start()
+    }
+}
+
+// single instance: bail out if another copy is already running
+if let bid = Bundle.main.bundleIdentifier {
+    let myPid = ProcessInfo.processInfo.processIdentifier
+    let others = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+        .filter { $0.processIdentifier != myPid }
+    if !others.isEmpty { exit(0) }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+let delegate = AppDelegate()
+app.delegate = delegate
+app.run()
