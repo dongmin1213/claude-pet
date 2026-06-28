@@ -305,97 +305,136 @@ struct PetRootView: View {
     }
 }
 
-// MARK: - Window
+// MARK: - Panel content (crab scene + bubble background)
 
-final class PetWindow: NSWindow {
-    init(view: NSView, size: CGSize) {
-        super.init(contentRect: NSRect(origin: .zero, size: size),
-                   styleMask: [.borderless], backing: .buffered, defer: false)
-        isOpaque = false
-        backgroundColor = .clear
-        hasShadow = false
-        level = .floating
-        isMovableByWindowBackground = true
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        contentView = view
+let PANEL_PAD: CGFloat = 10
+
+struct PanelView: View {
+    @ObservedObject var store: StateStore
+    var body: some View {
+        PetRootView(store: store)
+            .padding(PANEL_PAD)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(white: 0.11).opacity(0.94))
+            )
     }
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
 }
+
+// MARK: - Menu bar item + manually-positioned panel
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = StateStore()
-    var window: PetWindow!
-    var hosting: NSHostingView<PetRootView>!
-    var mouseTimer: Timer?
+    var statusItem: NSStatusItem!
+    var panel: NSPanel!
+    var hosting: NSHostingView<PanelView>!
+    var titleTimer: Timer?
+    var clickMonitor: Any?
 
-    /// True when the cursor is over an actual crab (so the window should grab
-    /// clicks); false over the transparent gaps (so clicks pass through).
-    func isOverCrab(at screen: NSPoint) -> Bool {
-        guard let w = window else { return true }
-        let f = w.frame
-        guard screen.x >= f.minX, screen.x <= f.maxX,
-              screen.y >= f.minY, screen.y <= f.maxY else { return false }
-        let lx = screen.x - f.minX
-        let ly = screen.y - f.minY
-        let canvasY = f.height - ly                 // renderer is top-down
-        let swMain = MAIN_PX * 16, shMain = MAIN_PX * 12
-        let swMini = MINI_PX * 16
-        for (row, s) in store.sessions.enumerated() {
-            let groundY = TOP_PAD + CGFloat(row) * ROW_H + (ROW_H - 16)
-            let top = groundY - shMain - 16          // include icon + bob headroom
-            let bot = groundY + 3
-            if canvasY < top || canvasY > bot { continue }
-            if abs(lx - MAIN_W/2) <= swMain/2 + 4 { return true }
-            for j in 0..<s.agents {
-                let slot = MAIN_W + CGFloat(j) * MINI_W + MINI_W/2
-                if abs(lx - slot) <= swMini/2 + 4 { return true }
-            }
-        }
-        return false
+    /// One glanceable summary for the menu bar. Priority: working > waiting >
+    /// done > idle. Shows a count when more than one session shares the state.
+    func menuTitle() -> String {
+        let s = store.sessions.filter { $0.id != "default" || !($0.state == .idle && $0.agents == 0) }
+        let working = s.filter { $0.state == .working }.count
+        let waiting = s.filter { $0.state == .waiting }.count
+        let done    = s.filter { $0.state == .done }.count
+        func tag(_ icon: String, _ n: Int) -> String { n > 1 ? "\(icon)\(n)" : icon }
+        if working > 0 { return "🦀" + tag("🔨", working) }
+        if waiting > 0 { return "🦀" + tag("💬", waiting) }
+        if done    > 0 { return "🦀" + tag("✅", done) }
+        return "🦀"
+    }
+
+    func panelSize() -> CGSize {
+        let c = store.contentSize(for: store.sessions)
+        return CGSize(width: c.width + PANEL_PAD * 2, height: c.height + PANEL_PAD * 2)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let initial = store.contentSize(for: store.sessions)
-        hosting = NSHostingView(rootView: PetRootView(store: store))
-        hosting.frame = NSRect(origin: .zero, size: initial)
+        // Borderless floating panel hosts the animated crab scene.
+        hosting = NSHostingView(rootView: PanelView(store: store))
+        panel = NSPanel(contentRect: NSRect(origin: .zero, size: panelSize()),
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        panel.isFloatingPanel = true
+        panel.level = .popUpMenu
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.contentView = hosting
 
+        // Menu bar item.
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem.button {
+            button.title = menuTitle()
+            button.target = self
+            button.action = #selector(statusClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+
+        // Keep the menu bar title in sync with state.
+        titleTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.statusItem.button?.title = self?.menuTitle() ?? "🦀"
+        }
+
+        // Re-fit/re-anchor the panel as sessions change while it's open.
+        store.onResize = { [weak self] _ in
+            guard let self = self, self.panel.isVisible else { return }
+            self.positionPanel()
+        }
+        store.start()
+    }
+
+    @objc func statusClicked(_ sender: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showMenu()
+        } else {
+            togglePanel()
+        }
+    }
+
+    func togglePanel() {
+        if panel.isVisible { closePanel() } else { openPanel() }
+    }
+
+    /// Place the panel directly under the status item button, clamped on screen.
+    func positionPanel() {
+        guard let button = statusItem.button, let bw = button.window else { return }
+        let size = panelSize()
+        hosting.frame = NSRect(origin: .zero, size: size)
+        let bf = bw.convertToScreen(button.convert(button.bounds, to: nil))
+        let screen = bw.screen ?? NSScreen.main
+        let vf = screen?.visibleFrame ?? bf
+        var x = bf.midX - size.width / 2
+        x = min(max(x, vf.minX + 4), vf.maxX - size.width - 4)
+        let y = bf.minY - size.height               // hang below the menu bar
+        panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+    }
+
+    func openPanel() {
+        positionPanel()
+        panel.orderFrontRegardless()
+        // dismiss when the user clicks anywhere outside the panel
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.closePanel()
+        }
+    }
+
+    func closePanel() {
+        panel.orderOut(nil)
+        if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+    }
+
+    func showMenu() {
+        closePanel()
         let menu = NSMenu()
         let quit = NSMenuItem(title: "Claude Pet 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
-        hosting.menu = menu
-
-        window = PetWindow(view: hosting, size: initial)
-        if let screen = NSScreen.main {
-            let f = screen.visibleFrame
-            window.setFrameOrigin(NSPoint(x: f.maxX - initial.width - 24, y: f.minY + 60))
-        }
-        window.orderFrontRegardless()
-
-        // click-through everywhere except directly on a crab
-        window.ignoresMouseEvents = true
-        mouseTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
-            guard let self = self, let w = self.window else { return }
-            w.ignoresMouseEvents = !self.isOverCrab(at: NSEvent.mouseLocation)
-        }
-
-        // resize on session/agent change; keep the window fully on screen
-        store.onResize = { [weak self] size in
-            guard let self = self, let w = self.window else { return }
-            var x = w.frame.minX
-            var y = w.frame.maxY - size.height   // keep TOP edge fixed -> grow downward
-            if let scr = NSScreen.main {
-                let vf = scr.visibleFrame
-                if x + size.width > vf.maxX { x = vf.maxX - size.width }
-                if x < vf.minX { x = vf.minX }
-                if y + size.height > vf.maxY { y = vf.maxY - size.height }
-                if y < vf.minY { y = vf.minY }
-            }
-            w.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
-            self.hosting.frame = NSRect(origin: .zero, size: size)
-        }
-        store.start()
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil                    // detach so left-click keeps toggling the panel
     }
 }
 

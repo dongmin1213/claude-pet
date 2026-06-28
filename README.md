@@ -1,16 +1,20 @@
 # claude-pet 🦀
 
-A floating macOS desktop pet that shows your Claude Code session state at a glance.
-Built so you can glance at one screen and know whether Claude is working, waiting for
-you, or done — while you do other things on another screen.
+A macOS **menu bar** pet that shows your Claude Code session state at a glance.
+A small crab lives in the menu bar; click it to pop open a panel of animated crabs —
+one per running session. Built so you can glance up and know whether Claude is
+working, waiting for you, or done — without a window covering your work.
 
 ![states](docs/states.png)
 
 ## What it shows
 
-- **Vertical = sessions.** One row per running Claude Code session (terminal).
-- **Horizontal = subagents.** Each session's running subagents line up to the right
-  as smaller, differently-colored crabs.
+- **Menu bar icon.** A 🦀 plus a glanceable summary of the busiest state across all
+  sessions (e.g. `🦀🔨2` = two sessions working). Priority: working > waiting > done > idle.
+- **Click → panel.** Opens directly under the icon with the full scene:
+  - **Vertical = sessions.** One row per running Claude Code session (terminal).
+  - **Horizontal = subagents.** Each session's running subagents line up to the right
+    as smaller, differently-colored crabs.
 - **State per session** (emoji + motion):
   | state | icon | meaning |
   |-------|------|---------|
@@ -19,8 +23,9 @@ you, or done — while you do other things on another screen.
   | done | ✅ | just finished (jump + sparkle, reverts to idle after 4s) |
   | idle | 💤 | nothing running (slow breathing) |
 
-The window auto-resizes (down for more sessions, right for more subagents) and stays
-on screen. Drag the pet to move it; right-click → quit.
+The panel auto-fits (down for more sessions, right for more subagents), stays on
+screen, and closes when you click away. Left-click the menu bar icon toggles it;
+right-click → quit.
 
 ## How it works
 
@@ -53,4 +58,5 @@ launchctl unload ~/Library/LaunchAgents/com.claudepet.agent.plist
 
 - The orange pixel crab is an **original homage** to Anthropic's Clawd mascot (safe to
   share). Swap in real art later if desired.
-- Future: remember last position, real Clawd sprite, per-session labels.
+- Future: animate the menu bar icon itself, real Clawd sprite, autostart toggle in the
+  right-click menu.
